@@ -1,0 +1,9 @@
+PyMuPDF
+langchain-core
+langchain-text-splitters
+chromadb
+rank-bm25
+groq
+python-dotenv
+fastapi
+uvicorn
