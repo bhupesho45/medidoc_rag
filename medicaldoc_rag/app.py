@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ import pymupdf
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from groq import GroqError
+from groq import APIConnectionError, APIStatusError, GroqError
 from pydantic import BaseModel, Field
 
 from medicaldoc_rag.config import CHROMA_DIRECTORY, UPLOAD_DIRECTORY
@@ -27,6 +28,7 @@ from medicaldoc_rag.retrieval import hybrid_search
 
 
 STATIC_DIRECTORY = Path(__file__).resolve().parent / "static"
+LOGGER = logging.getLogger(__name__)
 MAX_UPLOAD_FILES = 10
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 UPLOAD_READ_SIZE = 64 * 1024
@@ -168,7 +170,14 @@ def chat(request: ChatRequest) -> ChatResponse:
             detail="Upload one or more PDFs and build the index before searching.",
         )
 
-    results = hybrid_search(query, top_k=request.top_k)
+    try:
+        results = hybrid_search(query, top_k=request.top_k)
+    except (chromadb.errors.ChromaError, OSError, ValueError) as error:
+        LOGGER.exception("Document retrieval failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Document retrieval failed. Reindex the uploaded PDFs and try again.",
+        ) from error
     citations = [
         Citation(
             child_id=result.child_id,
@@ -194,7 +203,46 @@ def chat(request: ChatRequest) -> ChatResponse:
                 )
             except ValueError as error:
                 raise HTTPException(status_code=503, detail=str(error)) from error
+            except APIStatusError as error:
+                LOGGER.error(
+                    "Groq request failed (model=%s, status=%s, error_type=%s)",
+                    configured_groq_model(),
+                    error.status_code,
+                    type(error).__name__,
+                )
+                if error.status_code in (401, 403):
+                    detail = "Groq rejected the API key. Check GROQ_API_KEY in Render."
+                elif error.status_code == 404:
+                    detail = (
+                        f"Groq does not recognize model {configured_groq_model()}. "
+                        "Check GROQ_MODEL in Render."
+                    )
+                elif error.status_code == 429:
+                    detail = "Groq rate or usage limit reached. Try again later."
+                elif error.status_code == 400:
+                    detail = (
+                        "Groq rejected the completion request. Check the configured "
+                        "model and its supported parameters."
+                    )
+                else:
+                    detail = f"Groq returned HTTP {error.status_code}. Try again later."
+                raise HTTPException(status_code=502, detail=detail) from error
+            except APIConnectionError as error:
+                LOGGER.error(
+                    "Could not connect to Groq (model=%s, error_type=%s)",
+                    configured_groq_model(),
+                    type(error).__name__,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail="Could not connect to Groq. Check the deployment network and retry.",
+                ) from error
             except GroqError as error:
+                LOGGER.error(
+                    "Groq request failed (model=%s, error_type=%s)",
+                    configured_groq_model(),
+                    type(error).__name__,
+                )
                 raise HTTPException(
                     status_code=502,
                     detail=(

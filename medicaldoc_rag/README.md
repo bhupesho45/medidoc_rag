@@ -155,7 +155,9 @@ path (commonly `/var/data`). Only files under that mount path persist. See
    records in the `medicaldoc_parents` and `medicaldoc_children` collections.
 5. **Retrieve:** `retrieval/hybrid.py` ranks child chunks with ChromaDB semantic
    search and BM25 keyword search, fuses both rankings with reciprocal-rank
-   fusion, and returns the corresponding parent context.
+   fusion, and returns the corresponding parent context. Semantic-only matches
+   must be within a conservative distance threshold; keyword matches can still
+   be returned when that threshold is not met.
 6. **Generate:** `generation/groq.py` sends retrieved passages and the query to
    Groq with instructions to stay within the evidence, cite claims, and say when
    the sources do not provide an answer.
@@ -303,11 +305,13 @@ PDF files
    so stale content cannot remain searchable.
 4. **Retrieve (`retrieval/`)** — `hybrid.py` runs vector similarity search on
    child chunks and BM25 keyword ranking over the indexed child text. It
-   combines the two ranked lists with reciprocal-rank fusion (RRF), rather
-   than trying to compare raw vector distances with BM25 scores. It then
-   returns the best child passages together with their parent context, source,
-   page, fused score, and ranks. The default result count is five; the API
-   allows one to ten.
+   excludes semantic-only matches beyond the configured Chroma distance
+   cutoff, then combines semantic and keyword ranks with reciprocal-rank fusion
+   (RRF), rather than comparing raw vector distances with BM25 scores. A
+   keyword match can still be returned when it falls outside the semantic
+   cutoff. The API returns the best child passages together with their parent
+   context, source, page, fused score, and ranks. The default result count is
+   five; the API allows one to ten.
 5. **Generate (`generation/`)** — when `GROQ_API_KEY` is set, `groq.py` sends
    the question and retrieved parent passages to the configured Groq model
    (default `openai/gpt-oss-120b`). The prompt instructs the model to stay
@@ -328,7 +332,7 @@ PDF files
 | Recursive, overlapping parent/child chunks | Retrieves a compact passage while retaining surrounding context for generation; overlap reduces losses at split boundaries. | Character-based sizing is simple, but does not guarantee sentence or token boundaries. |
 | ChromaDB persistent collections | Stores vectors, source text, and metadata locally between runs without a separate hosted vector database. | The default embedding model may need an initial download; local storage is not encrypted by this application. |
 | Semantic plus BM25 retrieval | Semantic search can find related wording; BM25 helps exact terms and names. The combination covers complementary query styles. | BM25 corpus tokenization and ranking are rebuilt from stored child documents on every request, which is inefficient for a large corpus. |
-| Reciprocal-rank fusion | Merges rankings without assuming semantic distances and BM25 scores share a scale. | RRF is a ranking heuristic; no evaluation dataset or tuned relevance threshold is included. |
+| Reciprocal-rank fusion and semantic distance cutoff | Merges semantic and keyword rankings; filters weak semantic-only matches so unrelated questions do not automatically receive passages. | The 1.5 Chroma distance cutoff is a heuristic based on local checks, not an evaluated relevance threshold; tune it against a representative evaluation set before production use. |
 | Optional Groq generation | Adds natural-language synthesis and citations while keeping retrieval usable without an API key. | With generation enabled, the question and retrieved context leave the machine; model-generated citations and claims still require checking against the sources. |
 | FastAPI and a static browser UI | Provides a small local HTTP API and a browser workflow without a separate frontend build system. | There is no user authentication, multi-user isolation, or production deployment hardening. |
 
@@ -341,6 +345,14 @@ PDF files
   It returns the generated or retrieval-only answer plus citations. It returns
   HTTP 422 for invalid input, 503 if the index is unavailable or Groq
   configuration is invalid, and 502 if the Groq request fails.
+  If retrieval produces no matching passages, the response explicitly says so
+  and includes no citations rather than asking Groq to answer without evidence.
+  Groq failures return readable JSON `detail` messages for authentication,
+  model, quota/rate-limit, and connection errors; other provider failures
+  include their HTTP status. Render logs include the configured model and
+  provider status/error type, but not the API key, query, or retrieved passages.
+  Retrieval exceptions are logged with a traceback and return a 503 asking for
+  the index to be rebuilt.
 - `POST /api/reindex` reruns PDF loading, chunking, and indexing from uploaded
   PDFs. Its response includes the PDF, parent, and child counts.
 - `POST /api/upload` accepts multipart PDF uploads (up to 10 files, 20 MB

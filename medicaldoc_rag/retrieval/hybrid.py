@@ -16,6 +16,7 @@ from medicaldoc_rag.indexing.index import (
 _TOKEN_PATTERN = re.compile(r"\w+", re.UNICODE)
 _RRF_CONSTANT = 60
 _CANDIDATE_MULTIPLIER = 4
+MAX_SEMANTIC_DISTANCE = 1.5
 
 
 @dataclass(frozen=True)
@@ -88,9 +89,15 @@ def hybrid_search(
         include=["distances"],
     )
     semantic_ids = semantic_results["ids"][0]
+    semantic_distances = semantic_results["distances"][0]
 
     semantic_ranks = {
-        child_id: rank for rank, child_id in enumerate(semantic_ids, start=1)
+        child_id: rank
+        for rank, (child_id, distance) in enumerate(
+            zip(semantic_ids, semantic_distances),
+            start=1,
+        )
+        if distance <= MAX_SEMANTIC_DISTANCE
     }
     keyword_ranks = {
         child_ids[index]: rank

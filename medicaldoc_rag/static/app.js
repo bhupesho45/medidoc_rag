@@ -48,10 +48,16 @@ async function readApiResponse(response, fallbackMessage) {
   }
 
   if (!response.ok) {
-    const detail =
-      typeof payload.detail === "string"
+    const detail = typeof payload.detail === "string"
+      ? payload.detail
+      : Array.isArray(payload.detail)
         ? payload.detail
-        : `Request failed (HTTP ${response.status}).`;
+            .map((item) => item.msg)
+            .filter(Boolean)
+            .join("; ") || `Request failed (HTTP ${response.status}).`
+        : typeof payload.message === "string"
+          ? payload.message
+          : `Request failed (HTTP ${response.status}).`;
     throw new Error(detail);
   }
   return payload;
