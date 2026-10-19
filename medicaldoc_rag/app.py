@@ -1,6 +1,7 @@
 import hashlib
 import re
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import chromadb
@@ -11,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from groq import GroqError
 from pydantic import BaseModel, Field
 
+from medicaldoc_rag.config import CHROMA_DIRECTORY, UPLOAD_DIRECTORY
 from medicaldoc_rag.generation import (
     configured_groq_model,
     generate_grounded_answer,
@@ -19,10 +21,8 @@ from medicaldoc_rag.generation import (
 from medicaldoc_rag.indexing import run_indexing_pipeline
 from medicaldoc_rag.indexing.index import (
     CHILD_COLLECTION_NAME,
-    CHROMA_DIRECTORY,
     PARENT_COLLECTION_NAME,
 )
-from medicaldoc_rag.loading.pipeline import UPLOAD_DIRECTORY
 from medicaldoc_rag.retrieval import hybrid_search
 
 
@@ -47,6 +47,32 @@ app = FastAPI(
     description="Source-grounded hybrid search over local medical documents.",
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIRECTORY), name="static")
+
+_default_openapi = app.openapi
+
+
+def _openapi_with_pdf_file_schema() -> dict[str, Any]:
+    schema = _default_openapi()
+    upload_operation = schema.get("paths", {}).get("/api/upload", {}).get("post", {})
+    request_body = upload_operation.get("requestBody", {})
+    multipart = request_body.get("content", {}).get("multipart/form-data", {})
+    schema_ref = multipart.get("schema", {}).get("$ref", "")
+    component_name = schema_ref.rsplit("/", 1)[-1]
+    file_field = (
+        schema.get("components", {})
+        .get("schemas", {})
+        .get(component_name, {})
+        .get("properties", {})
+        .get("files", {})
+    )
+    file_item = file_field.get("items")
+    if file_item is not None:
+        file_item["format"] = "binary"
+        file_item["contentMediaType"] = "application/pdf"
+    return schema
+
+
+app.openapi = _openapi_with_pdf_file_schema
 
 
 class ChatRequest(BaseModel):
@@ -82,50 +108,49 @@ def home() -> FileResponse:
 def status() -> dict[str, object]:
     client = chromadb.PersistentClient(path=str(CHROMA_DIRECTORY))
     collection_names = {item.name for item in client.list_collections()}
-    indexed = {
+    parent_count = (
+        client.get_collection(PARENT_COLLECTION_NAME).count()
+        if PARENT_COLLECTION_NAME in collection_names
+        else 0
+    )
+    child_count = (
+        client.get_collection(CHILD_COLLECTION_NAME).count()
+        if CHILD_COLLECTION_NAME in collection_names
+        else 0
+    )
+    uploaded_pdfs = list(UPLOAD_DIRECTORY.glob("*.pdf"))
+    indexed = bool(uploaded_pdfs) and {
         CHILD_COLLECTION_NAME,
         PARENT_COLLECTION_NAME,
     }.issubset(collection_names)
-    uploaded_pdfs = list(UPLOAD_DIRECTORY.glob("*.pdf"))
-    if not uploaded_pdfs:
-        return {
-            "ready": False,
-            "parent_count": 0,
-            "child_count": 0,
-            "document_count": 0,
-            "llm_ready": groq_is_configured(),
-            "llm_model": configured_groq_model(),
-            "message": "Upload one or more PDFs to create your document index.",
-        }
     try:
         fingerprint_path = UPLOAD_DIRECTORY / ".index-fingerprint"
         indexed_fingerprint = fingerprint_path.read_text(encoding="ascii")
-        index_matches_uploads = indexed_fingerprint == _upload_fingerprint(uploaded_pdfs)
+        index_matches_uploads = bool(uploaded_pdfs) and (
+            indexed_fingerprint == _upload_fingerprint(uploaded_pdfs)
+        )
     except FileNotFoundError:
         index_matches_uploads = False
     indexed = indexed and index_matches_uploads
-    if not indexed:
-        return {
-            "ready": False,
-            "parent_count": 0,
-            "child_count": 0,
-            "document_count": len(uploaded_pdfs),
-            "llm_ready": groq_is_configured(),
-            "llm_model": configured_groq_model(),
-            "message": "Index your uploaded PDFs to enable search.",
-        }
-
     return {
-        "ready": True,
-        "parent_count": client.get_collection(PARENT_COLLECTION_NAME).count(),
-        "child_count": client.get_collection(CHILD_COLLECTION_NAME).count(),
+        "ready": indexed,
+        "parent_count": parent_count,
+        "child_count": child_count,
         "document_count": len(uploaded_pdfs),
         "llm_ready": groq_is_configured(),
         "llm_model": configured_groq_model(),
         "message": (
-            "Hybrid search and Groq answer generation are ready."
-            if groq_is_configured()
-            else "Hybrid search is ready; configure GROQ_API_KEY to generate answers."
+            (
+                "Hybrid search and Groq answer generation are ready."
+                if groq_is_configured()
+                else "Hybrid search is ready; configure GROQ_API_KEY to generate answers."
+            )
+            if indexed
+            else (
+                "Index your uploaded PDFs to enable search."
+                if uploaded_pdfs
+                else "Upload one or more PDFs to create your document index."
+            )
         ),
     }
 
@@ -206,15 +231,20 @@ def reindex() -> dict[str, object]:
             detail="Upload at least one PDF before building the document index.",
         )
     fingerprint_path = UPLOAD_DIRECTORY / ".index-fingerprint"
-    fingerprint_path.unlink(missing_ok=True)
     try:
+        fingerprint_path.unlink(missing_ok=True)
         result = run_indexing_pipeline()
+        fingerprint_path.write_text(
+            _upload_fingerprint(uploaded_pdfs),
+            encoding="ascii",
+        )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    fingerprint_path.write_text(
-        _upload_fingerprint(uploaded_pdfs),
-        encoding="ascii",
-    )
+    except (OSError, RuntimeError, chromadb.errors.ChromaError) as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not index the uploaded PDFs. Check server logs and retry.",
+        ) from error
     return {
         "ready": True,
         "parent_count": result.parent_count,
@@ -319,6 +349,15 @@ def upload_documents(files: list[UploadFile] = File(...)) -> dict[str, object]:
         if stored_paths:
             detail = f"PDFs were saved but could not be indexed: {detail}"
         raise HTTPException(status_code=422, detail=detail) from error
+    except (OSError, RuntimeError, chromadb.errors.ChromaError) as error:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "PDFs were saved, but indexing failed. Check server logs and retry."
+                if stored_paths
+                else "Could not save or index the selected PDFs. Check server logs and retry."
+            ),
+        ) from error
     finally:
         for path in staged_paths:
             path.unlink(missing_ok=True)

@@ -4,13 +4,14 @@ from fastapi import FastAPI
 from langchain_core.documents import Document
 from pydantic import BaseModel
 
+from medicaldoc_rag.config import UPLOAD_DIRECTORY
+
 from .clean import clean_documents
 from .load import load_pdf_directory
 from .metadata import build_page_metadata
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-UPLOAD_DIRECTORY = PROJECT_ROOT / "data" / "uploads"
 
 app = FastAPI(title="MedicalDoc RAG - Loading")
 

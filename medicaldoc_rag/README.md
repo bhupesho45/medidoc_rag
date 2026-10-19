@@ -70,6 +70,11 @@ interface. Uploaded files are stored locally in the ignored
 `medicaldoc_rag/data/uploads/` directory and are the only files included in
 the search index.
 
+To keep uploads and the ChromaDB index on a Render persistent disk, set
+`MEDICALDOC_DATA_DIR` to the disk's mount path (for example, `/var/data`).
+The application stores uploads and ChromaDB beneath that directory. Without
+the variable, it uses the project directory.
+
 ## Start the application
 
 From the repository root with the virtual environment active:
@@ -123,9 +128,21 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/api/reindex -Method Post
 
 Reindexing reads only uploaded PDFs (not the bundled sample files), regenerates
 chunks and embeddings, and replaces the existing index so removed/replaced
-source content does not remain searchable. The resulting ChromaDB data persists in
-`medicaldoc_rag/chroma_db/` across application restarts. ChromaDB's default
-embedding model may need to be downloaded the first time documents are indexed.
+source content does not remain searchable. On a local machine, ChromaDB data
+persists in `medicaldoc_rag/chroma_db/` across application restarts. Set
+`MEDICALDOC_DATA_DIR` to use another data location. ChromaDB's default embedding
+model may need to be downloaded the first time documents are indexed.
+
+### Render filesystem persistence
+
+Render Free web services use an ephemeral filesystem. Uploaded PDFs and
+ChromaDB files may be lost when a free service restarts, spins down, or
+redeploys; the service can then require PDFs to be uploaded and indexed again.
+Free services cannot use a persistent disk. For durable storage, attach a
+persistent disk to a paid web service and set `MEDICALDOC_DATA_DIR` to its mount
+path (commonly `/var/data`). Only files under that mount path persist. See
+[Render persistent disks](https://render.com/docs/disks) and
+[Render Free services](https://render.com/docs/free).
 
 ## How the pipeline works
 

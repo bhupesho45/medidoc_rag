@@ -4,9 +4,9 @@ from pathlib import Path
 import chromadb
 from langchain_core.documents import Document
 
+from medicaldoc_rag.config import CHROMA_DIRECTORY
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CHROMA_DIRECTORY = PROJECT_ROOT / "chroma_db"
 PARENT_COLLECTION_NAME = "medicaldoc_parents"
 CHILD_COLLECTION_NAME = "medicaldoc_children"
 

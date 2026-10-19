@@ -35,11 +35,32 @@ function showOperationStatus(message) {
   operationStatus.hidden = false;
 }
 
+async function readApiResponse(response, fallbackMessage) {
+  const responseText = await response.text();
+  let payload;
+  try {
+    payload = responseText ? JSON.parse(responseText) : {};
+  } catch {
+    const detail = response.ok
+      ? "The server returned an invalid response."
+      : `The server returned a non-JSON error (HTTP ${response.status}). Check the deployment logs.`;
+    throw new Error(`${fallbackMessage} ${detail}`);
+  }
+
+  if (!response.ok) {
+    const detail =
+      typeof payload.detail === "string"
+        ? payload.detail
+        : `Request failed (HTTP ${response.status}).`;
+    throw new Error(detail);
+  }
+  return payload;
+}
+
 async function refreshStatus() {
   try {
     const response = await fetch("/api/status");
-    if (!response.ok) throw new Error("Could not read index status.");
-    const state = await response.json();
+    const state = await readApiResponse(response, "Could not read index status.");
     statusText.textContent = !state.ready
       ? state.document_count
         ? "Index needed"
@@ -133,11 +154,7 @@ async function submitQuery(query) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query: cleanedQuery, top_k: 5 }),
     });
-    const payload = await response.json();
-    if (!response.ok) {
-      const message = payload.detail || "Search failed. Please try again.";
-      throw new Error(message);
-    }
+    const payload = await readApiResponse(response, "Search failed.");
     appendResponse(payload);
   } catch (error) {
     showError(error.message || "Could not reach the search service.");
@@ -180,8 +197,7 @@ reindexButton.addEventListener("click", async () => {
   statusText.textContent = "Indexing";
   try {
     const response = await fetch("/api/reindex", { method: "POST" });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || "Reindexing failed.");
+    await readApiResponse(response, "Reindexing failed.");
     await refreshStatus();
     showOperationStatus("Your uploaded PDFs have been reindexed.");
   } catch (error) {
@@ -230,8 +246,7 @@ pdfInput.addEventListener("change", async () => {
 
   try {
     const response = await fetch("/api/upload", { method: "POST", body: formData });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || "PDF upload failed.");
+    const payload = await readApiResponse(response, "PDF upload failed.");
     await refreshStatus();
     showOperationStatus(
       `Uploaded and indexed ${payload.document_count} PDF file(s). You can now ask questions about them.`,
