@@ -1,9 +1,9 @@
 # MedicalDoc RAG
 
-MedicalDoc is a local, source-grounded search application for PDF documents. It
-extracts and cleans PDF text, splits pages into linked parent and child chunks,
-embeds and stores those chunks in ChromaDB, and combines semantic search with
-BM25 keyword search. A browser frontend lets you search the indexed documents
+MedicalDoc is a local, source-grounded search application for user-uploaded PDF
+documents. It extracts and cleans PDF text, splits pages into linked parent and
+child chunks, embeds and stores those chunks in ChromaDB, and combines semantic
+search with BM25 keyword search. Upload PDFs in the browser, ask questions,
 and inspect matching excerpts with their source page and wider parent context.
 
 > **Medical information notice:** Generated responses are grounded in retrieved
@@ -13,6 +13,8 @@ and inspect matching excerpts with their source page and wider parent context.
 ## Features
 
 - Extract text one page at a time from PDFs with PyMuPDF.
+- Upload PDFs through the browser; uploaded files are stored locally and
+  automatically indexed.
 - Clean extracted text and attach stable source, page, and document metadata.
 - Create overlapping parent and child chunks:
   - Parents: up to 1,000 characters, with 100 characters of overlap.
@@ -30,7 +32,8 @@ and inspect matching excerpts with their source page and wider parent context.
 ```text
 medicaldoc_rag/
 ├── app.py                  # FastAPI application and JSON endpoints
-├── data/pdfs/              # Source PDFs to index
+├── data/pdfs/              # Bundled sample PDFs (not indexed)
+├── data/uploads/           # User-uploaded PDFs (created locally; git-ignored)
 ├── loading/                # PDF extraction, cleaning, and metadata
 ├── chunking/               # Parent/child chunk generation
 ├── indexing/               # Embedding and persistent ChromaDB storage
@@ -61,8 +64,11 @@ terminal session or invoke the environment's Python directly:
 .\.venv\Scripts\python.exe -m pip install -r medicaldoc_rag\loading\requirements.txt
 ```
 
-Put PDF files to index in `medicaldoc_rag/data/pdfs/`. The supplied sample PDFs
-are already in that folder.
+The supplied sample PDFs in `medicaldoc_rag/data/pdfs/` are for reference only
+and are not indexed. Add your own PDFs with **Upload PDFs** in the browser
+interface. Uploaded files are stored locally in the ignored
+`medicaldoc_rag/data/uploads/` directory and are the only files included in
+the search index.
 
 ## Start the application
 
@@ -105,22 +111,25 @@ retrieved passages used as answer context are sent to Groq's API. PDFs,
 embeddings, and the ChromaDB index remain local. Do not use sensitive documents
 unless you are authorized to send relevant excerpts to the configured provider.
 
-The application does not automatically rebuild the index on startup. If the
-status shows that indexing is needed, click **Reindex documents** in the UI or
-call the reindex endpoint:
+The application does not automatically rebuild the index on startup. Use
+**Upload PDFs** in the UI to add files and automatically index them. Uploaded
+files persist locally in `medicaldoc_rag/data/uploads/`; subsequent uploads
+are added to that local library. Use **Reindex documents** to rebuild the
+index from all uploaded PDFs or call the reindex endpoint:
 
 ```powershell
 Invoke-RestMethod -Uri http://127.0.0.1:8000/api/reindex -Method Post
 ```
 
-Reindexing reads the PDFs, regenerates chunks and embeddings, and upserts them
-using stable IDs. The resulting ChromaDB data persists in
+Reindexing reads only uploaded PDFs (not the bundled sample files), regenerates
+chunks and embeddings, and replaces the existing index so removed/replaced
+source content does not remain searchable. The resulting ChromaDB data persists in
 `medicaldoc_rag/chroma_db/` across application restarts. ChromaDB's default
 embedding model may need to be downloaded the first time documents are indexed.
 
 ## How the pipeline works
 
-1. **Load:** `loading/load.py` extracts text from each PDF page.
+1. **Load:** `loading/load.py` extracts text from each uploaded PDF page.
 2. **Clean and identify:** `loading/clean.py` normalizes whitespace and drops
    empty pages. `loading/metadata.py` adds stable source, page, and document IDs.
 3. **Chunk:** `chunking/chunk.py` creates parent chunks and smaller child chunks.
@@ -139,8 +148,10 @@ embedding model may need to be downloaded the first time documents are indexed.
 ## Use the browser interface
 
 1. Start the server and open <http://127.0.0.1:8000>.
-2. Confirm the header says **Index ready**. If it does not, select **Reindex
-   documents**.
+2. Select **Upload PDFs**, choose one or more text-based PDFs, and wait for
+   indexing to complete. New uploads are indexed automatically. If you already
+   have uploaded files but the header says **Index needed**, select
+   **Reindex documents**.
 3. Enter a question or choose one of the sample prompts.
 4. Review the answer, ranked excerpts, source PDF and page, and
    semantic/keyword ranks.
@@ -161,8 +172,8 @@ Interactive OpenAPI documentation is available at
 
 ### `GET /api/status`
 
-Returns whether both ChromaDB collections are available and the number of
-indexed parent and child chunks.
+Returns whether both ChromaDB collections match the current uploaded PDFs and
+the number of indexed documents, parent chunks, and child chunks.
 
 ### `POST /api/chat`
 
@@ -200,8 +211,19 @@ Invoke-RestMethod `
 
 ### `POST /api/reindex`
 
-Rebuilds the index from PDFs in `medicaldoc_rag/data/pdfs/`. The operation
-returns the number of parent and child chunks indexed.
+Rebuilds the index from all user-uploaded PDFs in
+`medicaldoc_rag/data/uploads/`. The operation returns the number of PDFs,
+parent chunks, and child chunks indexed. It returns HTTP 409 if no PDFs have
+been uploaded.
+
+### `POST /api/upload`
+
+Accepts multipart form data with one or more `files` fields. The UI uses this
+endpoint when **Upload PDFs** is selected. Only PDF files are accepted, with
+up to 10 files per request and a 20 MB limit per file. A successful upload
+automatically rebuilds the index from all uploaded PDFs. Files and the index
+remain on the local machine across application restarts; uploaded PDFs are
+excluded from Git.
 
 ## Current scope and limitations
 
@@ -211,7 +233,10 @@ returns the number of parent and child chunks indexed.
   advice.
 - BM25 is calculated from the indexed child texts during each search request;
   semantic vectors are persisted in ChromaDB.
-- The bundled PDFs are the only content until more PDFs are added and indexed.
+- Only PDFs uploaded through the application are indexed; the bundled sample
+  PDFs in `data/pdfs/` are not part of search.
+- Uploads accumulate in the local library. There is not yet a UI/API for
+  listing or deleting individual uploaded files.
 - The first embedding-model download requires internet access. Groq generation
   requires internet access and a valid API key; PDF processing, embeddings, and
   retrieval otherwise run locally.
@@ -241,11 +266,13 @@ PDF files
   -> API response and browser citations
 ```
 
-1. **Load (`loading/`)** — `load.py` extracts text page by page with PyMuPDF.
+1. **Load (`loading/`)** — `load.py` extracts text page by page from uploaded
+   PDFs with PyMuPDF.
    `clean.py` removes control characters, normalizes whitespace, and skips
    blank pages. `metadata.py` records a source path relative to the project,
-   one-based page number, and stable document ID. The current loader reads
-   `*.pdf` files from `data/pdfs/`; scanned/image-only PDFs are not OCR'd.
+   one-based page number, and stable document ID. The loader reads `*.pdf`
+   files from `data/uploads/`; PDFs without extractable text are rejected
+   because scanned/image-only PDFs are not OCR'd.
 2. **Chunk (`chunking/`)** — `chunk.py` uses LangChain's recursive character
    splitter to form 1,000-character parent chunks (100-character overlap) and
    200-character child chunks (40-character overlap). Child chunks carry a
@@ -254,8 +281,9 @@ PDF files
 3. **Index (`indexing/`)** — `index.py` writes parent and child text and
    metadata to separate persistent ChromaDB collections. ChromaDB's default
    embedding function creates vectors when adding documents and embeds a
-   search query at query time. Stable IDs and `upsert` make reindexing
-   repeatable for unchanged source documents.
+   search query at query time. Stable IDs make repeated indexing of unchanged
+   source documents consistent; each rebuild replaces the previous collections
+   so stale content cannot remain searchable.
 4. **Retrieve (`retrieval/`)** — `hybrid.py` runs vector similarity search on
    child chunks and BM25 keyword ranking over the indexed child text. It
    combines the two ranked lists with reciprocal-rank fusion (RRF), rather
@@ -291,13 +319,15 @@ PDF files
 
 - `GET /api/status` reports `ready`, parent/child counts, Groq readiness, and
   the configured model. An index is ready only when both expected collections
-  exist.
+  exist and match the current set of uploaded PDFs.
 - `POST /api/chat` validates the query (2–2,000 characters) and `top_k` (1–10).
   It returns the generated or retrieval-only answer plus citations. It returns
   HTTP 422 for invalid input, 503 if the index is unavailable or Groq
   configuration is invalid, and 502 if the Groq request fails.
-- `POST /api/reindex` reruns PDF loading, chunking, and indexing. Its response
-  includes the resulting parent and child counts.
+- `POST /api/reindex` reruns PDF loading, chunking, and indexing from uploaded
+  PDFs. Its response includes the PDF, parent, and child counts.
+- `POST /api/upload` accepts multipart PDF uploads (up to 10 files, 20 MB
+  each), stores them locally, and automatically rebuilds the index.
 - FastAPI's interactive API documentation is at `/docs` while the server is
   running.
 
@@ -305,7 +335,7 @@ PDF files
 
 Implemented in this repository:
 
-- Local PDF directory ingestion and page-numbered source metadata.
+- Browser PDF upload, local storage, and page-numbered source metadata.
 - Text cleanup, parent/child chunking, persistent vector indexing.
 - Combined semantic and lexical retrieval with fused rankings.
 - Optional evidence-oriented answer generation and source context in the API.
@@ -313,16 +343,16 @@ Implemented in this repository:
 
 Not implemented (or not evidenced by this codebase):
 
-- OCR, web search, other document formats, an upload/management UI, or
-  per-user libraries.
+- OCR, web search, other document formats, a UI/API for listing and deleting
+  uploaded files, or per-user libraries.
 - Login, role-based access, multi-user/session management, conversation
   history, or deployment security controls.
 - Medical model fine-tuning, validated clinical decision support, or a
   guarantee that generated citations match every individual claim.
 - Automated retrieval/answer quality evaluation or a checked-in test suite.
 
-The bundled PDFs are the available local knowledge base; adding other PDFs to
-`data/pdfs/` and reindexing changes what the system can retrieve. The
+The PDFs uploaded to the local library are the knowledge base; adding PDFs
+through the browser and reindexing changes what the system can retrieve. The
 application itself does not validate medical correctness. It is an educational
 document-search tool, not a clinician or a replacement for professional care.
 

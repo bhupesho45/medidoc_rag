@@ -10,16 +10,16 @@ from .metadata import build_page_metadata
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PDF_DIRECTORY = PROJECT_ROOT / "data" / "pdfs"
+UPLOAD_DIRECTORY = PROJECT_ROOT / "data" / "uploads"
 
 app = FastAPI(title="MedicalDoc RAG - Loading")
 
 
 def run_loading_pipeline(
-    pdf_dir: str | Path = PDF_DIRECTORY,
+    pdf_dir: str | Path = UPLOAD_DIRECTORY,
     project_root: str | Path = PROJECT_ROOT,
 ) -> list[Document]:
-    """Load PDFs, clean page text, and attach retrieval-ready metadata."""
+    """Load uploaded PDFs, clean page text, and attach retrieval-ready metadata."""
     loaded_pages = load_pdf_directory(pdf_dir)
     documents_with_metadata: list[Document] = []
     for source_path, page_number, raw_document in loaded_pages:
@@ -49,7 +49,7 @@ class LoadResponse(BaseModel):
 
 @app.post("/load", response_model=LoadResponse)
 def load_documents() -> LoadResponse:
-    """Load the project's PDFs and return cleaned pages with metadata."""
+    """Load uploaded PDFs and return cleaned pages with metadata."""
     documents = run_loading_pipeline()
     return LoadResponse(
         page_count=len(documents),

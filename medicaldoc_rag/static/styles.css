@@ -194,6 +194,8 @@ h1 {
 }
 h1 span { color: #65947f; }
 .welcome-copy { max-width: 430px; margin: 0; color: #829089; font-size: 12px; line-height: 1.8; }
+.upload-hint { max-width: 430px; margin: 15px 0 0; color: #829089; font-size: 11px; line-height: 1.7; }
+.upload-hint strong { color: #4b7661; }
 .suggestion-label {
   margin: 31px 0 10px;
   color: #96a39c;
@@ -281,6 +283,7 @@ h1 span { color: #65947f; }
 .spinner { width: 14px; height: 14px; border: 2px solid #dce9e1; border-top-color: #438568; border-radius: 50%; animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .error-banner { margin-top: 12px; padding: 10px 12px; border: 1px solid #f0d7cf; border-radius: 7px; background: #fff8f5; color: #965845; font-size: 11px; line-height: 1.6; }
+.operation-status { margin: 12px 0; padding: 10px 12px; border: 1px solid #dcebe1; border-radius: 7px; background: #f5faf6; color: #4b7661; font-size: 11px; line-height: 1.6; }
 
 .composer-area { width: min(100%, 730px); align-self: center; padding: 0 28px 19px; }
 .composer { padding: 12px 12px 9px 15px; border: 1px solid #e3eae4; border-radius: 10px; background: white; box-shadow: 0 7px 26px rgba(37, 70, 52, .045); }

@@ -1,6 +1,11 @@
+import hashlib
+import re
 from pathlib import Path
+from uuid import uuid4
+
 import chromadb
-from fastapi import FastAPI, HTTPException
+import pymupdf
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from groq import GroqError
@@ -17,10 +22,25 @@ from medicaldoc_rag.indexing.index import (
     CHROMA_DIRECTORY,
     PARENT_COLLECTION_NAME,
 )
+from medicaldoc_rag.loading.pipeline import UPLOAD_DIRECTORY
 from medicaldoc_rag.retrieval import hybrid_search
 
 
 STATIC_DIRECTORY = Path(__file__).resolve().parent / "static"
+MAX_UPLOAD_FILES = 10
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+UPLOAD_READ_SIZE = 64 * 1024
+
+
+def _upload_fingerprint(uploaded_pdfs: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(uploaded_pdfs):
+        metadata = path.stat()
+        digest.update(path.name.encode("utf-8"))
+        digest.update(str(metadata.st_size).encode("ascii"))
+        digest.update(str(metadata.st_mtime_ns).encode("ascii"))
+    return digest.hexdigest()
+
 
 app = FastAPI(
     title="MedicalDoc RAG",
@@ -66,20 +86,40 @@ def status() -> dict[str, object]:
         CHILD_COLLECTION_NAME,
         PARENT_COLLECTION_NAME,
     }.issubset(collection_names)
+    uploaded_pdfs = list(UPLOAD_DIRECTORY.glob("*.pdf"))
+    if not uploaded_pdfs:
+        return {
+            "ready": False,
+            "parent_count": 0,
+            "child_count": 0,
+            "document_count": 0,
+            "llm_ready": groq_is_configured(),
+            "llm_model": configured_groq_model(),
+            "message": "Upload one or more PDFs to create your document index.",
+        }
+    try:
+        fingerprint_path = UPLOAD_DIRECTORY / ".index-fingerprint"
+        indexed_fingerprint = fingerprint_path.read_text(encoding="ascii")
+        index_matches_uploads = indexed_fingerprint == _upload_fingerprint(uploaded_pdfs)
+    except FileNotFoundError:
+        index_matches_uploads = False
+    indexed = indexed and index_matches_uploads
     if not indexed:
         return {
             "ready": False,
             "parent_count": 0,
             "child_count": 0,
+            "document_count": len(uploaded_pdfs),
             "llm_ready": groq_is_configured(),
             "llm_model": configured_groq_model(),
-            "message": "Index the bundled PDFs to enable search.",
+            "message": "Index your uploaded PDFs to enable search.",
         }
 
     return {
         "ready": True,
         "parent_count": client.get_collection(PARENT_COLLECTION_NAME).count(),
         "child_count": client.get_collection(CHILD_COLLECTION_NAME).count(),
+        "document_count": len(uploaded_pdfs),
         "llm_ready": groq_is_configured(),
         "llm_model": configured_groq_model(),
         "message": (
@@ -100,7 +140,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     if not state["ready"]:
         raise HTTPException(
             status_code=503,
-            detail="The document index is not ready. Use Reindex documents first.",
+            detail="Upload one or more PDFs and build the index before searching.",
         )
 
     results = hybrid_search(query, top_k=request.top_k)
@@ -159,10 +199,137 @@ def chat(request: ChatRequest) -> ChatResponse:
 
 @app.post("/api/reindex")
 def reindex() -> dict[str, object]:
-    result = run_indexing_pipeline()
+    uploaded_pdfs = list(UPLOAD_DIRECTORY.glob("*.pdf"))
+    if not uploaded_pdfs:
+        raise HTTPException(
+            status_code=409,
+            detail="Upload at least one PDF before building the document index.",
+        )
+    fingerprint_path = UPLOAD_DIRECTORY / ".index-fingerprint"
+    fingerprint_path.unlink(missing_ok=True)
+    try:
+        result = run_indexing_pipeline()
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    fingerprint_path.write_text(
+        _upload_fingerprint(uploaded_pdfs),
+        encoding="ascii",
+    )
     return {
         "ready": True,
         "parent_count": result.parent_count,
         "child_count": result.child_count,
-        "message": "Documents loaded, chunked, embedded, and indexed.",
+        "document_count": len(uploaded_pdfs),
+        "message": "Uploaded PDFs loaded, chunked, embedded, and indexed.",
+    }
+
+
+@app.post("/api/upload")
+def upload_documents(files: list[UploadFile] = File(...)) -> dict[str, object]:
+    if not files:
+        raise HTTPException(status_code=422, detail="Select at least one PDF to upload.")
+    if len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Upload no more than {MAX_UPLOAD_FILES} PDF files at a time.",
+        )
+
+    UPLOAD_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    staged_paths: list[Path] = []
+    stored_paths: list[Path] = []
+    pending_files: list[tuple[Path, Path]] = []
+    try:
+        for upload in files:
+            original_name = (upload.filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+            if not original_name.lower().endswith(".pdf"):
+                raise HTTPException(
+                    status_code=415,
+                    detail=f"{original_name or 'Each uploaded file'} must be a PDF.",
+                )
+
+            safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", original_name).strip("._")
+            if not safe_name:
+                safe_name = "document.pdf"
+            elif safe_name.lower().endswith(".pdf"):
+                safe_name = f"{safe_name[:-4]}.pdf"
+            else:
+                safe_name += ".pdf"
+
+            file_id = uuid4().hex
+            staged_path = UPLOAD_DIRECTORY / f".upload-{file_id}.tmp"
+            final_path = UPLOAD_DIRECTORY / f"{file_id}-{safe_name}"
+            staged_paths.append(staged_path)
+            pending_files.append((staged_path, final_path))
+            size = 0
+            signature = b""
+            with staged_path.open("wb") as destination:
+                while chunk := upload.file.read(UPLOAD_READ_SIZE):
+                    size += len(chunk)
+                    if size > MAX_UPLOAD_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"{original_name} exceeds the 20 MB per-file limit.",
+                        )
+                    if len(signature) < 5:
+                        signature += chunk[: 5 - len(signature)]
+                    destination.write(chunk)
+
+            if not signature.startswith(b"%PDF-"):
+                raise HTTPException(
+                    status_code=415,
+                    detail=f"{original_name} is not a valid PDF file.",
+                )
+            try:
+                with pymupdf.open(
+                    stream=staged_path.read_bytes(),
+                    filetype="pdf",
+                ) as pdf:
+                    if not pdf.page_count:
+                        raise HTTPException(
+                            status_code=415,
+                            detail=f"{original_name} does not contain any PDF pages.",
+                        )
+                    if not any(page.get_text("text").strip() for page in pdf):
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"{original_name} has no extractable text. "
+                                "Scanned PDFs require OCR, which is not supported."
+                            ),
+                        )
+            except pymupdf.FileDataError as error:
+                raise HTTPException(
+                    status_code=415,
+                    detail=f"{original_name} is not a readable PDF file.",
+                ) from error
+        for staged_path, final_path in pending_files:
+            staged_path.replace(final_path)
+            staged_paths.remove(staged_path)
+            stored_paths.append(final_path)
+        result = reindex()
+    except HTTPException as error:
+        if stored_paths:
+            raise HTTPException(
+                status_code=error.status_code,
+                detail=f"PDFs were saved but could not be indexed: {error.detail}",
+            ) from error
+        raise
+    except ValueError as error:
+        detail = str(error)
+        if stored_paths:
+            detail = f"PDFs were saved but could not be indexed: {detail}"
+        raise HTTPException(status_code=422, detail=detail) from error
+    finally:
+        for path in staged_paths:
+            path.unlink(missing_ok=True)
+        for upload in files:
+            upload.file.close()
+
+    return {
+        "ready": result["ready"],
+        "document_count": result["document_count"],
+        "parent_count": result["parent_count"],
+        "child_count": result["child_count"],
+        "filenames": [path.name for path in stored_paths],
+        "message": "Uploaded PDFs are indexed and ready for questions.",
     }

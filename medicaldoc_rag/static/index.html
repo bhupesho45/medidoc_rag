@@ -58,6 +58,17 @@
             <span id="connection-status" class="connection-status">
               <span class="status-dot"></span><span id="status-text">Connecting</span>
             </span>
+            <input
+              id="pdf-input"
+              class="visually-hidden"
+              type="file"
+              accept=".pdf,application/pdf"
+              multiple
+              aria-label="Choose PDF documents to upload"
+            />
+            <button id="upload-button" class="button button-secondary" type="button">
+              <span aria-hidden="true">＋</span> Upload PDFs
+            </button>
             <button id="reindex-button" class="button button-secondary" type="button">
               <span aria-hidden="true">↻</span> Reindex documents
             </button>
@@ -72,8 +83,12 @@
             <div class="eyebrow"><span></span> YOUR DOCUMENT LIBRARY</div>
             <h1>Answers, grounded<br />in <span>your documents.</span></h1>
             <p class="welcome-copy">
-              Search your medical PDFs with hybrid semantic and keyword retrieval.
-              Every result links back to its source.
+              Upload your PDFs to create a private local library. Search them with
+              hybrid retrieval and review every answer against its source.
+            </p>
+            <p class="upload-hint">
+              Choose <strong>Upload PDFs</strong> above to add up to 10 PDF files
+              (20 MB each). Uploaded documents are indexed automatically.
             </p>
 
             <div class="suggestion-label">TRY ASKING</div>
@@ -96,6 +111,7 @@
             </div>
           </div>
 
+          <div id="operation-status" class="operation-status" role="status" hidden></div>
           <div id="messages" class="messages" aria-live="polite"></div>
           <div id="error-banner" class="error-banner" role="alert" hidden></div>
         </section>

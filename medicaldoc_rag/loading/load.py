@@ -29,7 +29,12 @@ def load_pdf_directory(
         raise FileNotFoundError(f"PDF directory not found: {directory}")
 
     documents: list[tuple[Path, int, Document]] = []
-    for pdf_path in sorted(directory.glob("*.pdf")):
+    pdf_paths = sorted(
+        path
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() == ".pdf"
+    )
+    for pdf_path in pdf_paths:
         documents.extend(
             (pdf_path, page_number, document)
             for page_number, document in load_pdf_pages(pdf_path)

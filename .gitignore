@@ -5,3 +5,4 @@
 __pycache__/
 *.py[cod]
 medicaldoc_rag/chroma_db/
+medicaldoc_rag/data/uploads/

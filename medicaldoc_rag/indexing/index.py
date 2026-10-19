@@ -42,8 +42,12 @@ def store_parent_child_chunks(
 
     directory = Path(persist_directory).resolve()
     client = chromadb.PersistentClient(path=str(directory))
-    parent_collection = client.get_or_create_collection(PARENT_COLLECTION_NAME)
-    child_collection = client.get_or_create_collection(CHILD_COLLECTION_NAME)
+    existing_collections = {item.name for item in client.list_collections()}
+    for collection_name in (PARENT_COLLECTION_NAME, CHILD_COLLECTION_NAME):
+        if collection_name in existing_collections:
+            client.delete_collection(collection_name)
+    parent_collection = client.create_collection(PARENT_COLLECTION_NAME)
+    child_collection = client.create_collection(CHILD_COLLECTION_NAME)
 
     _upsert_documents(parent_collection, parents, parent_ids)
     _upsert_documents(child_collection, children, child_ids)
