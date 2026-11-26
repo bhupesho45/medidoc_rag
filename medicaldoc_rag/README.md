@@ -144,6 +144,97 @@ path (commonly `/var/data`). Only files under that mount path persist. See
 [Render persistent disks](https://render.com/docs/disks) and
 [Render Free services](https://render.com/docs/free).
 
+### Cloud upload and chat failures: what happened and what changed
+
+Local success does not prove the deployed service has the same environment or
+data. The local app and Render run as separate processes with separate
+environment variables, installed runtime state, network access, and filesystems.
+The following is the evidence-based history of the reported failures:
+
+1. **Swagger showed `files` as strings and upload failed validation.** The
+   upload route accepts `UploadFile` values in multipart form data, but the
+   generated OpenAPI schema described the file items as strings. Swagger
+   therefore did not reliably present/select actual binary PDFs; a request
+   containing a string was rejected with HTTP 422 (`Expected UploadFile,
+   received: str`). The OpenAPI schema now marks each `files` item as a binary
+   `application/pdf`, and the browser sends the selected PDFs as `FormData`
+   using the field name `files`.
+2. **The browser reported `Unexpected token '<'`.** The UI attempted to parse
+   every response as JSON. When a proxy or server returned an HTML error page,
+   parsing began at its `<` character and failed, hiding the useful failure
+   status/body. The frontend now handles JSON errors and non-JSON responses
+   separately, displaying an actionable message instead of a JSON parse error.
+3. **A deployed upload/index request later returned HTTP 502.** The service
+   subsequently exposed the expected binary upload schema, accepted invalid
+   PDFs with a clear JSON 415 response, and the user confirmed that valid PDFs
+   indexed and appeared in status. The original 502's exact server-side cause
+   was not established: its matching Render request logs/response body were
+   unavailable. Do not treat the ephemeral filesystem as a confirmed cause;
+   status showed an indexed document at the time of later checks.
+4. **Chat also returned a generic HTTP 502 after indexing.** Upload/indexing
+   and chat generation are separate requests. Chat first retrieves from
+   ChromaDB, then calls Groq when `GROQ_API_KEY` is non-empty. Before the
+   diagnostics changes, the UI showed only the status and Groq failures were
+   not classified for the user. A non-empty key check does not validate that
+   Render's secret is current/valid, that the selected model is available, or
+   that the account has quota or network connectivity. Local synthetic Groq
+   generation succeeded, but that does not test Render's environment.
+5. **The historic chat 502's exact cause is also unconfirmed.** No Render log
+   for that failing chat request was supplied, so it cannot be stated whether
+   it was an invalid/unauthorized key, model/configuration rejection, quota or
+   rate limit, network/provider failure, or another exception. The code now
+   logs the Groq model, HTTP status when available, and exception type without
+   logging the key, user query, or retrieved document passages. It returns
+   more specific JSON errors for common Groq failures, and the UI shows those
+   messages. Retrieval exceptions are logged and return HTTP 503 with
+   reindex guidance.
+6. **Weak or unrelated semantic matches could still reach generation.** The
+   earlier retriever always included its nearest vector results, even when
+   their distances were large. The hybrid retriever now filters semantic-only
+   results beyond a 1.5 Chroma distance heuristic, while retaining keyword
+   matches. If nothing qualifies, the API returns a no-matching-passages
+   response without calling Groq. The cutoff is provisional: it was checked
+   against a small local example, not a representative relevance test set.
+7. **A separate empty-response error path could mask Groq's failure.** The
+   generator referenced `GroqError` without importing it. That could raise a
+   `NameError` when Groq returned empty content; the missing import is fixed.
+
+**How to diagnose a future cloud failure:** open the matching Render log entry
+at the exact request time and check the endpoint, HTTP status, and the new
+error category. For a chat 502, verify Render's `GROQ_API_KEY` secret and
+`GROQ_MODEL` setting, then check the logged provider status (401/403 suggests
+credentials/permissions, 404 a model name, 429 rate/quota, and a connection
+error network/provider connectivity). Never paste the API key into logs,
+issues, or chat. For an upload/index failure, check the `/api/upload` response
+body and Render logs; confirm `/api/status` reports ready and non-zero document
+and chunk counts. After a free-service restart or deploy, re-upload PDFs and
+reindex if the filesystem was cleared. For durable cloud data, use a Render
+persistent disk on a supported paid service and point `MEDICALDOC_DATA_DIR`
+to its mount path.
+
+### Why an uploaded PDF may not be searchable
+
+Uploading a PDF and retrieving an answer from it are different steps. A file
+can upload successfully while some or all of its text is unavailable to search.
+The supported workflow extracts embedded PDF text; it does not currently
+perform OCR or search pixels in scanned page images.
+
+| What you see | Why it can happen in this project | What to check or do |
+|---|---|---|
+| Upload returns “no extractable text” | The PDF contains scanned/image-only pages, or no page has text PyMuPDF can extract. The upload check rejects a document with no extractable page text. | Try selecting and copying text in a PDF reader. If the page is only an image, OCR it with a trusted tool to produce a searchable PDF, then upload that version. OCR is not built into this app. |
+| A PDF uploads, but certain pages or sections are missing | Extraction uses `page.get_text("text")`. The cleaning step drops pages whose extracted text is empty. In a mixed PDF, digital-text pages can be indexed while image-only scanned pages are skipped. Complex layouts, unusual fonts, or damaged text encoding can also extract with missing or jumbled reading order. | Check the source PDF by copying text from the missing page. Make a searchable/OCR-processed copy if it is image-based. Review the retrieved page citation and excerpt to see what text was actually indexed. |
+| The status shows PDFs, but zero chunks or search says the index is unavailable | The PDF files may exist without a matching completed ChromaDB index, indexing may have failed, or the current server filesystem may not contain the same uploads/index as before. `ready` requires uploaded PDFs and both ChromaDB collections to match the current upload fingerprint. | Check `/api/status` for `ready`, `document_count`, `parent_count`, and `child_count`; inspect the upload/reindex response and Render logs. Re-upload after a Render Free restart if the ephemeral filesystem was cleared, then reindex. |
+| Search returns no passages even though the PDF has text | Retrieval is based on indexed child chunks, not a full-document keyword scan. BM25 needs token overlap with the query; semantic-only candidates farther than the configured 1.5 Chroma distance cutoff are discarded. A broad, differently worded, misspelled, or very specific question may therefore have no qualifying result. | Try distinctive terms that appear in the document, alternate wording, or a shorter question. Verify the expected passage appears in the indexed PDF text. Reindex after changing uploads. |
+| Search finds passages, but the answer is incomplete | Only the highest-ranked child passages and their parent context are sent to Groq. The passage may omit the needed detail, the PDF may have extracted it poorly, or the model may not answer correctly despite the evidence. | Inspect the returned citations, page numbers, excerpts, and expanded parent context. Ask a narrower question using terms from the passage; do not rely on an answer that the cited text does not support. |
+
+For cloud deployments, a successful local search proves only that the local
+PDF text and local ChromaDB index work. Render has its own uploads, index,
+environment, and filesystem. Render Free storage can be cleared on restarts or
+redeploys, so the cloud may need the PDFs uploaded and indexed again. The
+reported historical “some PDFs were not fetched” issue was not tied to a
+specific PDF or a saved Render extraction log; these are the code-confirmed
+reasons to check, not a claim that one particular cause was proven.
+
 ## How the pipeline works
 
 1. **Load:** `loading/load.py` extracts text from each uploaded PDF page.
